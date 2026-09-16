@@ -7,6 +7,7 @@
 
 import type {AddChange, CommitChange, ModifyChange, RemoveChange} from './github/diffTypes';
 
+import {getFileTreeComparison} from './PullRequestFileTreeComparison';
 import {gitHubBlobAtom, gitHubPullRequestVersionDiffAtom} from './jotai';
 import {getFileAnchorID, getPathForChange} from './utils';
 import {
@@ -47,11 +48,17 @@ type DirectoryNode = {
 
 type TreeNode = FileNode | DirectoryNode;
 
-const EMPTY_CHANGES: CommitChange[] = [];
-
 export default function PullRequestFileTree(): React.ReactElement {
   const versionDiff = useAtomValue(gitHubPullRequestVersionDiffAtom);
-  const changes = versionDiff?.diff ?? EMPTY_CHANGES;
+  const comparison = getFileTreeComparison(versionDiff);
+  return <PullRequestFileTreeForComparison key={comparison.key} changes={comparison.changes} />;
+}
+
+function PullRequestFileTreeForComparison({
+  changes,
+}: {
+  changes: CommitChange[];
+}): React.ReactElement {
   const [query, setQuery] = useState('');
   const [collapsedDirectories, setCollapsedDirectories] = useState<Set<string>>(() => new Set());
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
