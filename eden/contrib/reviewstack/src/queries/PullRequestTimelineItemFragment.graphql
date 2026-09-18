@@ -47,10 +47,19 @@ fragment PullRequestTimelineItemFragment on PullRequestTimelineItems {
     }
   }
   ... on IssueComment {
+    id
     author {
       ...ActorFragment
     }
+    body
     bodyHTML
+    reactionGroups {
+      content
+      reactors {
+        totalCount
+      }
+      viewerHasReacted
+    }
   }
   ... on RenamedTitleEvent {
     actor {

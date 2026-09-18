@@ -22,9 +22,27 @@ import type {
   AddPullRequestReviewCommentInput,
   AddPullRequestReviewCommentMutationData,
   AddPullRequestReviewCommentMutationVariables,
+  AddPullRequestReviewThreadInput,
+  AddPullRequestReviewThreadMutationData,
+  AddPullRequestReviewThreadMutationVariables,
+  AddReactionInput,
+  AddReactionMutationData,
+  AddReactionMutationVariables,
   CommitQueryData,
   CommitQueryVariables,
+  ConvertPullRequestToDraftInput,
+  ConvertPullRequestToDraftMutationData,
+  ConvertPullRequestToDraftMutationVariables,
+  DeleteIssueCommentInput,
+  DeleteIssueCommentMutationData,
+  DeleteIssueCommentMutationVariables,
+  DeletePullRequestReviewCommentInput,
+  DeletePullRequestReviewCommentMutationData,
+  DeletePullRequestReviewCommentMutationVariables,
   LabelFragment,
+  MarkPullRequestReadyForReviewInput,
+  MarkPullRequestReadyForReviewMutationData,
+  MarkPullRequestReadyForReviewMutationVariables,
   PullRequestQueryData,
   PullRequestQueryVariables,
   PullsQueryData,
@@ -32,6 +50,9 @@ import type {
   RemoveLabelsFromLabelableInput,
   RemoveLabelsFromLabelableMutationData,
   RemoveLabelsFromLabelableMutationVariables,
+  RemoveReactionInput,
+  RemoveReactionMutationData,
+  RemoveReactionMutationVariables,
   RepoAssignableUsersQueryData,
   RepoAssignableUsersQueryVariables,
   RepoLabelsQueryData,
@@ -39,6 +60,9 @@ import type {
   RequestReviewsInput,
   RequestReviewsMutationData,
   RequestReviewsMutationVariables,
+  ResolveReviewThreadInput,
+  ResolveReviewThreadMutationData,
+  ResolveReviewThreadMutationVariables,
   StackPullRequestFragment,
   StackPullRequestQueryVariables,
   StackPullRequestQueryData,
@@ -47,6 +71,15 @@ import type {
   SubmitPullRequestReviewMutationVariables,
   TreeQueryData,
   TreeQueryVariables,
+  UpdateIssueCommentInput,
+  UpdateIssueCommentMutationData,
+  UpdateIssueCommentMutationVariables,
+  UpdatePullRequestReviewCommentInput,
+  UpdatePullRequestReviewCommentMutationData,
+  UpdatePullRequestReviewCommentMutationVariables,
+  UnresolveReviewThreadInput,
+  UnresolveReviewThreadMutationData,
+  UnresolveReviewThreadMutationVariables,
   UserFragment,
 } from '../generated/graphql';
 
@@ -58,16 +91,27 @@ import {
   AddLabelsToLabelableMutation,
   AddPullRequestReviewMutation,
   AddPullRequestReviewCommentMutation,
+  AddPullRequestReviewThreadMutation,
+  AddReactionMutation,
   CommitQuery,
+  ConvertPullRequestToDraftMutation,
+  DeleteIssueCommentMutation,
+  DeletePullRequestReviewCommentMutation,
+  MarkPullRequestReadyForReviewMutation,
   PullRequestQuery,
   PullsQuery,
   RemoveLabelsFromLabelableMutation,
+  RemoveReactionMutation,
   RepoAssignableUsersQuery,
   RepoLabelsQuery,
   RequestReviewsMutation,
+  ResolveReviewThreadMutation,
   StackPullRequestQuery,
   SubmitPullRequestReviewMutation,
   TreeQuery,
+  UpdateIssueCommentMutation,
+  UpdatePullRequestReviewCommentMutation,
+  UnresolveReviewThreadMutation,
 } from '../generated/graphql';
 import {createRequestHeaders} from 'shared/github/auth';
 import {notEmpty} from 'shared/utils';
@@ -76,12 +120,30 @@ const MAX_PARENT_COMMITS_TO_FETCH = 10;
 const NUM_COMMENTS_TO_FETCH = 10;
 const NUM_TIMELINE_ITEMS_TO_FETCH = 100;
 
+function isMissingPullRequestError(error: unknown): boolean {
+  return (
+    error instanceof GitHubGraphQLError &&
+    !error.isRateLimitError &&
+    error.errors.length > 0 &&
+    error.errors.every(
+      ({message, path, type}) =>
+        type === 'NOT_FOUND' &&
+        message.startsWith('Could not resolve to a PullRequest') &&
+        path?.length === 2 &&
+        path[0] === 'repository' &&
+        path[1] === 'pullRequest',
+    )
+  );
+}
+
 /**
  * Implementation of GitHub client that fetches data via GraphQL.
  */
 export default class GraphQLGitHubClient implements GitHubClient {
   private requestHeaders: Record<string, string>;
   private graphQLEndpoint: string;
+  private prefetchedTrees = new Map<GitObjectID, Tree>();
+  private treePrefetches = new Map<GitObjectID, Promise<void>>();
 
   /**
    * An instance of GraphQLGitHubClient is specific to a GitHub
@@ -155,6 +217,11 @@ export default class GraphQLGitHubClient implements GitHubClient {
   }
 
   async getTree(oid: GitObjectID): Promise<Tree | null> {
+    const prefetchedTree = this.prefetchedTrees.get(oid);
+    if (prefetchedTree != null) {
+      return prefetchedTree;
+    }
+
     const variables = {
       org: this.organization,
       repo: this.repositoryName,
@@ -164,6 +231,40 @@ export default class GraphQLGitHubClient implements GitHubClient {
     const data = await this.query<TreeQueryData, TreeQueryVariables>(TreeQuery, variables);
     ++globalCacheStats.gitHubGetTree;
     return objectToTree(data?.repositoryOwner?.repository?.object);
+  }
+
+  prefetchTree(oid: GitObjectID): Promise<void> {
+    const existing = this.treePrefetches.get(oid);
+    if (existing != null) {
+      return existing;
+    }
+
+    const url = `https://api.${this.hostname}/repos/${encodeURIComponent(
+      this.organization,
+    )}/${encodeURIComponent(this.repositoryName)}/git/trees/${oid}?recursive=1`;
+    const prefetch = fetch(url, {headers: this.requestHeaders, method: 'GET'})
+      .then(async response => {
+        if (response.status === 403 || response.status === 404 || response.status === 409) {
+          return;
+        }
+        if (!response.ok) {
+          throw new Error(`HTTP request error: ${response.status}: ${response.statusText}`);
+        }
+
+        const json = await response.json();
+        if (json.truncated) {
+          return;
+        }
+        for (const tree of treesFromRecursiveResponse(json.sha ?? oid, json.tree ?? [])) {
+          this.prefetchedTrees.set(tree.oid, tree);
+        }
+      })
+      .catch(error => {
+        this.treePrefetches.delete(oid);
+        throw error;
+      });
+    this.treePrefetches.set(oid, prefetch);
+    return prefetch;
   }
 
   async getBlob(oid: GitObjectID): Promise<Blob | null> {
@@ -256,6 +357,21 @@ export default class GraphQLGitHubClient implements GitHubClient {
     return {
       mergeBaseCommit: json.merge_base_commit,
       commits: json.commits,
+      files: (json.files ?? []).map(
+        (file: {
+          additions: number;
+          deletions: number;
+          filename: string;
+          previous_filename?: string;
+          status: string;
+        }) => ({
+          additions: file.additions,
+          deletions: file.deletions,
+          filename: file.filename,
+          previousFilename: file.previous_filename,
+          status: file.status,
+        }),
+      ),
     };
   }
 
@@ -357,19 +473,48 @@ export default class GraphQLGitHubClient implements GitHubClient {
     // not one of them, so we have to make a separate GraphQL call for each PR.
     // It would be nice to update this if the API changes.
     const data = await Promise.all(
-      prs.map(pr =>
-        this.query<StackPullRequestQueryData, StackPullRequestQueryVariables>(
-          StackPullRequestQuery,
-          {
-            owner: this.organization,
-            name: this.repositoryName,
-            pr,
-          },
-        ),
-      ),
+      prs.map(async pr => {
+        try {
+          return await this.query<StackPullRequestQueryData, StackPullRequestQueryVariables>(
+            StackPullRequestQuery,
+            {
+              owner: this.organization,
+              name: this.repositoryName,
+              pr,
+            },
+          );
+        } catch (error) {
+          // Stack metadata can outlive a deleted PR or refer to a PR that the
+          // current user cannot access. GitHub returns partial data together
+          // with a NOT_FOUND error in that case. Keep the remaining stack
+          // usable while continuing to surface all other GraphQL failures.
+          if (isMissingPullRequestError(error)) {
+            return null;
+          }
+          throw error;
+        }
+      }),
     );
 
-    return data.map(({repository}) => repository?.pullRequest).filter(notEmpty);
+    return data.map(result => result?.repository?.pullRequest).filter(notEmpty);
+  }
+
+  convertPullRequestToDraft(
+    input: ConvertPullRequestToDraftInput,
+  ): Promise<ConvertPullRequestToDraftMutationData> {
+    return this.query<
+      ConvertPullRequestToDraftMutationData,
+      ConvertPullRequestToDraftMutationVariables
+    >(ConvertPullRequestToDraftMutation, {input});
+  }
+
+  markPullRequestReadyForReview(
+    input: MarkPullRequestReadyForReviewInput,
+  ): Promise<MarkPullRequestReadyForReviewMutationData> {
+    return this.query<
+      MarkPullRequestReadyForReviewMutationData,
+      MarkPullRequestReadyForReviewMutationVariables
+    >(MarkPullRequestReadyForReviewMutation, {input});
   }
 
   addComment(id: ID, body: string): Promise<AddCommentMutationData> {
@@ -406,6 +551,78 @@ export default class GraphQLGitHubClient implements GitHubClient {
       AddPullRequestReviewCommentMutationData,
       AddPullRequestReviewCommentMutationVariables
     >(AddPullRequestReviewCommentMutation, {input});
+  }
+
+  addPullRequestReviewThread(
+    input: AddPullRequestReviewThreadInput,
+  ): Promise<AddPullRequestReviewThreadMutationData> {
+    return this.query<
+      AddPullRequestReviewThreadMutationData,
+      AddPullRequestReviewThreadMutationVariables
+    >(AddPullRequestReviewThreadMutation, {input});
+  }
+
+  addReaction(input: AddReactionInput): Promise<AddReactionMutationData> {
+    return this.query<AddReactionMutationData, AddReactionMutationVariables>(AddReactionMutation, {
+      input,
+    });
+  }
+
+  removeReaction(input: RemoveReactionInput): Promise<RemoveReactionMutationData> {
+    return this.query<RemoveReactionMutationData, RemoveReactionMutationVariables>(
+      RemoveReactionMutation,
+      {input},
+    );
+  }
+
+  resolveReviewThread(
+    input: ResolveReviewThreadInput,
+  ): Promise<ResolveReviewThreadMutationData> {
+    return this.query<ResolveReviewThreadMutationData, ResolveReviewThreadMutationVariables>(
+      ResolveReviewThreadMutation,
+      {input},
+    );
+  }
+
+  unresolveReviewThread(
+    input: UnresolveReviewThreadInput,
+  ): Promise<UnresolveReviewThreadMutationData> {
+    return this.query<UnresolveReviewThreadMutationData, UnresolveReviewThreadMutationVariables>(
+      UnresolveReviewThreadMutation,
+      {input},
+    );
+  }
+
+  updateIssueComment(input: UpdateIssueCommentInput): Promise<UpdateIssueCommentMutationData> {
+    return this.query<UpdateIssueCommentMutationData, UpdateIssueCommentMutationVariables>(
+      UpdateIssueCommentMutation,
+      {input},
+    );
+  }
+
+  deleteIssueComment(input: DeleteIssueCommentInput): Promise<DeleteIssueCommentMutationData> {
+    return this.query<DeleteIssueCommentMutationData, DeleteIssueCommentMutationVariables>(
+      DeleteIssueCommentMutation,
+      {input},
+    );
+  }
+
+  updatePullRequestReviewComment(
+    input: UpdatePullRequestReviewCommentInput,
+  ): Promise<UpdatePullRequestReviewCommentMutationData> {
+    return this.query<
+      UpdatePullRequestReviewCommentMutationData,
+      UpdatePullRequestReviewCommentMutationVariables
+    >(UpdatePullRequestReviewCommentMutation, {input});
+  }
+
+  deletePullRequestReviewComment(
+    input: DeletePullRequestReviewCommentInput,
+  ): Promise<DeletePullRequestReviewCommentMutationData> {
+    return this.query<
+      DeletePullRequestReviewCommentMutationData,
+      DeletePullRequestReviewCommentMutationVariables
+    >(DeletePullRequestReviewCommentMutation, {input});
   }
 
   removeLabels(
@@ -446,6 +663,51 @@ function objectToTree(object: any): Tree {
     oid,
     entries,
   };
+}
+
+type RecursiveTreeEntry = {
+  mode: string;
+  path: string;
+  sha: GitObjectID;
+  type: string;
+};
+
+export function treesFromRecursiveResponse(
+  rootOID: GitObjectID,
+  entries: RecursiveTreeEntry[],
+): Tree[] {
+  const oidByPath = new Map<string, GitObjectID>([['', rootOID]]);
+  for (const entry of entries) {
+    if (entry.type === 'tree') {
+      oidByPath.set(entry.path, entry.sha);
+    }
+  }
+
+  const treeByPath = new Map<string, Tree>();
+  for (const [path, oid] of oidByPath) {
+    treeByPath.set(path, {id: oid, oid, entries: []});
+  }
+
+  for (const entry of entries) {
+    const slash = entry.path.lastIndexOf('/');
+    const parentPath = slash === -1 ? '' : entry.path.slice(0, slash);
+    const parent = treeByPath.get(parentPath);
+    if (parent == null) {
+      continue;
+    }
+    parent.entries.push({
+      mode: parseInt(entry.mode, 8),
+      name: slash === -1 ? entry.path : entry.path.slice(slash + 1),
+      oid: entry.sha,
+      path: entry.path,
+      type: entry.type === 'tree' ? 'tree' : 'blob',
+    });
+  }
+
+  for (const tree of treeByPath.values()) {
+    tree.entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  }
+  return [...treeByPath.values()];
 }
 
 /**

@@ -19,14 +19,36 @@ import type {
   AddPullRequestReviewMutationData,
   AddPullRequestReviewCommentInput,
   AddPullRequestReviewCommentMutationData,
+  AddPullRequestReviewThreadInput,
+  AddPullRequestReviewThreadMutationData,
+  AddReactionInput,
+  AddReactionMutationData,
+  ConvertPullRequestToDraftInput,
+  ConvertPullRequestToDraftMutationData,
+  DeleteIssueCommentInput,
+  DeleteIssueCommentMutationData,
+  DeletePullRequestReviewCommentInput,
+  DeletePullRequestReviewCommentMutationData,
   LabelFragment,
+  MarkPullRequestReadyForReviewInput,
+  MarkPullRequestReadyForReviewMutationData,
   RemoveLabelsFromLabelableInput,
   RemoveLabelsFromLabelableMutationData,
+  RemoveReactionInput,
+  RemoveReactionMutationData,
   RequestReviewsInput,
   RequestReviewsMutationData,
+  ResolveReviewThreadInput,
+  ResolveReviewThreadMutationData,
   StackPullRequestFragment,
   SubmitPullRequestReviewInput,
   SubmitPullRequestReviewMutationData,
+  UpdateIssueCommentInput,
+  UpdateIssueCommentMutationData,
+  UpdatePullRequestReviewCommentInput,
+  UpdatePullRequestReviewCommentMutationData,
+  UnresolveReviewThreadInput,
+  UnresolveReviewThreadMutationData,
   UserFragment,
 } from '../generated/graphql';
 
@@ -46,6 +68,10 @@ export default class TestGitHubClient implements GitHubClient {
 
   getCommitComparison(_base: GitObjectID, _head: GitObjectID): Promise<CommitComparison | null> {
     return Promise.resolve(null);
+  }
+
+  prefetchTree(_oid: GitObjectID): Promise<void> {
+    return Promise.resolve();
   }
 
   getTree(oid: GitObjectID): Promise<Tree | null> {
@@ -76,6 +102,18 @@ export default class TestGitHubClient implements GitHubClient {
     return Promise.resolve([]);
   }
 
+  convertPullRequestToDraft(
+    _input: ConvertPullRequestToDraftInput,
+  ): Promise<ConvertPullRequestToDraftMutationData> {
+    return Promise.resolve({});
+  }
+
+  markPullRequestReadyForReview(
+    _input: MarkPullRequestReadyForReviewInput,
+  ): Promise<MarkPullRequestReadyForReviewMutationData> {
+    return Promise.resolve({});
+  }
+
   addComment(_id: ID, _body: string): Promise<AddCommentMutationData> {
     return Promise.resolve({});
   }
@@ -93,6 +131,52 @@ export default class TestGitHubClient implements GitHubClient {
   addPullRequestReviewComment(
     _input: AddPullRequestReviewCommentInput,
   ): Promise<AddPullRequestReviewCommentMutationData> {
+    return Promise.resolve({});
+  }
+
+  addPullRequestReviewThread(
+    _input: AddPullRequestReviewThreadInput,
+  ): Promise<AddPullRequestReviewThreadMutationData> {
+    return Promise.resolve({});
+  }
+
+  addReaction(_input: AddReactionInput): Promise<AddReactionMutationData> {
+    return Promise.resolve({});
+  }
+
+  removeReaction(_input: RemoveReactionInput): Promise<RemoveReactionMutationData> {
+    return Promise.resolve({});
+  }
+
+  resolveReviewThread(
+    _input: ResolveReviewThreadInput,
+  ): Promise<ResolveReviewThreadMutationData> {
+    return Promise.resolve({});
+  }
+
+  unresolveReviewThread(
+    _input: UnresolveReviewThreadInput,
+  ): Promise<UnresolveReviewThreadMutationData> {
+    return Promise.resolve({});
+  }
+
+  updateIssueComment(_input: UpdateIssueCommentInput): Promise<UpdateIssueCommentMutationData> {
+    return Promise.resolve({});
+  }
+
+  deleteIssueComment(_input: DeleteIssueCommentInput): Promise<DeleteIssueCommentMutationData> {
+    return Promise.resolve({});
+  }
+
+  updatePullRequestReviewComment(
+    _input: UpdatePullRequestReviewCommentInput,
+  ): Promise<UpdatePullRequestReviewCommentMutationData> {
+    return Promise.resolve({});
+  }
+
+  deletePullRequestReviewComment(
+    _input: DeletePullRequestReviewCommentInput,
+  ): Promise<DeletePullRequestReviewCommentMutationData> {
     return Promise.resolve({});
   }
 

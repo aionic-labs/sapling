@@ -80,22 +80,39 @@ describe('GitHubCodeReviewProvider comments', () => {
     await expect(provider.fetchComments('42')).resolves.toMatchObject([
       {
         id: '101',
+        url: 'https://github.com/owner/repo/pull/42#discussion_r101',
         content: 'Please change this.',
         filename: 'src/example.ts',
         startLine: 10,
         line: 12,
         side: 'RIGHT',
         isResolved: false,
-        replies: [{id: '102', content: 'Done.'}],
+        replies: [
+          {
+            id: '102',
+            url: 'https://github.com/owner/repo/pull/42#discussion_r102',
+            content: 'Done.',
+          },
+        ],
       },
     ]);
+    expect(mockQueryGraphQL.mock.calls[0]?.[1]).toMatchObject({
+      includeReactions: true,
+      numToFetch: 50,
+    });
   });
 
   it('posts a multiline comment against the latest pull request head', async () => {
     mockQueryREST.mockResolvedValueOnce({head: {sha: 'head-sha'}} as never);
-    mockQueryREST.mockResolvedValueOnce({} as never);
+    mockQueryREST.mockResolvedValueOnce({
+      id: 123,
+      html_url: 'https://github.com/owner/repo/pull/42#discussion_r123',
+      body: '```suggestion\nreplacement\n```',
+      created_at: '2026-09-16T10:00:00Z',
+      user: {login: 'reviewer', avatar_url: 'https://example.com/avatar'},
+    } as never);
 
-    await provider.createInlineComment('42', {
+    const created = await provider.createInlineComment('42', {
       body: '```suggestion\nreplacement\n```',
       path: 'src/example.ts',
       startLine: 10,
@@ -118,6 +135,14 @@ describe('GitHubCodeReviewProvider comments', () => {
         side: 'RIGHT',
       },
     );
+    expect(created).toEqual({
+      id: '123',
+      url: 'https://github.com/owner/repo/pull/42#discussion_r123',
+      body: '```suggestion\nreplacement\n```',
+      author: 'reviewer',
+      authorAvatarUri: 'https://example.com/avatar',
+      created: new Date('2026-09-16T10:00:00Z'),
+    });
   });
 
   it('posts replies without looking up the pull request head', async () => {
@@ -138,5 +163,47 @@ describe('GitHubCodeReviewProvider comments', () => {
       'POST',
       {body: 'Reply', in_reply_to: 101},
     );
+  });
+});
+
+describe('GitHubCodeReviewProvider summaries', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-09-17T06:00:00Z'));
+    jest.clearAllMocks();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('throttles automatic refreshes while allowing a forced refresh', async () => {
+    mockQueryGraphQL.mockResolvedValueOnce({__type: null} as never).mockResolvedValue({
+      search: {nodes: []},
+    } as never);
+    const summariesProvider = new GitHubCodeReviewProvider(
+      {type: 'github', hostname: 'github.com', owner: 'owner', repo: 'repo'},
+      {info: jest.fn(), error: jest.fn()} as unknown as Logger,
+    );
+
+    summariesProvider.triggerDiffSummariesFetch([]);
+    await jest.runAllTimersAsync();
+    expect(mockQueryGraphQL).toHaveBeenCalledTimes(2);
+    expect(mockQueryGraphQL.mock.calls[1][0]).toContain('commits(last: 1)');
+
+    summariesProvider.triggerDiffSummariesFetch([]);
+    await jest.runAllTimersAsync();
+    expect(mockQueryGraphQL).toHaveBeenCalledTimes(2);
+
+    summariesProvider.triggerDiffSummariesFetch([], true);
+    await jest.runAllTimersAsync();
+    expect(mockQueryGraphQL).toHaveBeenCalledTimes(3);
+
+    jest.advanceTimersByTime(5 * 60_000);
+    summariesProvider.triggerDiffSummariesFetch([]);
+    await jest.runAllTimersAsync();
+    expect(mockQueryGraphQL).toHaveBeenCalledTimes(4);
+
+    summariesProvider.dispose();
   });
 });

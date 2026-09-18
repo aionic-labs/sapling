@@ -19,13 +19,19 @@ import type {
   ReviewRequestedEventItem,
   ReviewRequestRemovedEventItem,
 } from './github/pullRequestTimelineTypes';
+import type {ID} from './github/types';
 
 import ActorHeading from './ActorHeading';
 import CenteredSpinner from './CenteredSpinner';
+import CommentLink from './CommentLink';
+import CommentReactions from './CommentReactions';
 import CommitLink from './CommitLink';
+import EditableComment from './EditableComment';
 import PendingLabel from './PendingLabel';
 import PullRequestReviewComment from './PullRequestReviewComment';
+import PullRequestTimelineReply from './PullRequestTimelineReply';
 import TrustedRenderedMarkdown from './TrustedRenderedMarkdown';
+import {commentAnchorID} from './commentLinkUtils';
 import {
   gitHubOrgAndRepoAtom,
   gitHubPullRequestAtom,
@@ -104,10 +110,13 @@ function TimelineItem({
 function TimelineCallout(props: {
   actor?: Actor | null;
   children: React.ReactNode;
+  commentID?: ID;
   isPending?: boolean;
 }): React.ReactElement {
   return (
-    <Box padding="4px 6px 0">
+    <Box
+      id={props.commentID == null ? undefined : commentAnchorID(props.commentID)}
+      padding="4px 6px 0">
       <Box
         backgroundColor="canvas.default"
         color="fg.default"
@@ -120,7 +129,10 @@ function TimelineCallout(props: {
           <Box display="flex" gridGap={1}>
             <ActorHeading actor={props.actor} /> <Text fontSize={12}>commented</Text>
           </Box>
-          {props.isPending && <PendingLabel />}
+          <Box display="flex" alignItems="center" gridGap={1}>
+            {props.isPending && <PendingLabel />}
+            {props.commentID != null && <CommentLink id={props.commentID} />}
+          </Box>
         </Box>
         {props.children}
       </Box>
@@ -191,13 +203,14 @@ function PullRequestReview({item}: {item: PullRequestReviewItem}): React.ReactEl
     <>
       {action}
       {hasContent && (
-        <TimelineCallout actor={item.author} isPending={isPending}>
+        <TimelineCallout actor={item.author} commentID={item.id} isPending={isPending}>
           {item.bodyHTML !== '' && (
             <Box paddingY={1}>
               <TrustedRenderedMarkdown
                 className="PRT-bodyHTML PRT-review-comment-text"
                 trustedHTML={item.bodyHTML}
               />
+              <PullRequestTimelineReply commentID={item.id} authorLogin={item.author?.login} />
             </Box>
           )}
           {comments.length > 0 && (
@@ -240,11 +253,24 @@ function ReviewAction({
 
 function IssueComment({item}: {item: IssueCommentItem}): React.ReactElement {
   return (
-    <TimelineCallout actor={item.author}>
-      <TrustedRenderedMarkdown
+    <TimelineCallout actor={item.author} commentID={item.id}>
+      <EditableComment
+        id={item.id}
+        authorLogin={item.author?.login}
+        body={item.body}
+        kind="issue"
         className="PRT-bodyHTML PRT-review-comment-text"
-        trustedHTML={item.bodyHTML}
+        bodyHTML={item.bodyHTML}
       />
+      <CommentReactions
+        commentID={item.id}
+        reactionGroups={(item.reactionGroups ?? []).map(group => ({
+          content: group.content,
+          count: group.reactors.totalCount,
+          viewerHasReacted: group.viewerHasReacted,
+        }))}
+      />
+      <PullRequestTimelineReply commentID={item.id} authorLogin={item.author?.login} />
     </TimelineCallout>
   );
 }

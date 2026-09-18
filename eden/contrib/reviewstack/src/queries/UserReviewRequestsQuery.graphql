@@ -1,0 +1,7 @@
+query UserReviewRequestsQuery($reviewRequestedQuery: String!) {
+  search(first: 50, query: $reviewRequestedQuery, type: ISSUE) {
+    nodes {
+      ...HomePagePullRequestFragment
+    }
+  }
+}

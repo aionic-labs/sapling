@@ -18,14 +18,36 @@ import type {
   AddPullRequestReviewMutationData,
   AddPullRequestReviewCommentInput,
   AddPullRequestReviewCommentMutationData,
+  AddPullRequestReviewThreadInput,
+  AddPullRequestReviewThreadMutationData,
+  AddReactionInput,
+  AddReactionMutationData,
+  ConvertPullRequestToDraftInput,
+  ConvertPullRequestToDraftMutationData,
+  DeleteIssueCommentInput,
+  DeleteIssueCommentMutationData,
+  DeletePullRequestReviewCommentInput,
+  DeletePullRequestReviewCommentMutationData,
   LabelFragment,
+  MarkPullRequestReadyForReviewInput,
+  MarkPullRequestReadyForReviewMutationData,
   RemoveLabelsFromLabelableInput,
   RemoveLabelsFromLabelableMutationData,
+  RemoveReactionInput,
+  RemoveReactionMutationData,
   RequestReviewsInput,
   RequestReviewsMutationData,
+  ResolveReviewThreadInput,
+  ResolveReviewThreadMutationData,
   StackPullRequestFragment,
   SubmitPullRequestReviewInput,
   SubmitPullRequestReviewMutationData,
+  UpdateIssueCommentInput,
+  UpdateIssueCommentMutationData,
+  UpdatePullRequestReviewCommentInput,
+  UpdatePullRequestReviewCommentMutationData,
+  UnresolveReviewThreadInput,
+  UnresolveReviewThreadMutationData,
   UserFragment,
 } from '../generated/graphql';
 
@@ -40,6 +62,10 @@ export default class RejectingGitHubClient implements GitHubClient {
   }
 
   getCommitComparison(_base: GitObjectID, _head: GitObjectID): Promise<CommitComparison> {
+    return Promise.reject('Method not implemented.');
+  }
+
+  prefetchTree(_oid: GitObjectID): Promise<void> {
     return Promise.reject('Method not implemented.');
   }
 
@@ -71,6 +97,18 @@ export default class RejectingGitHubClient implements GitHubClient {
     return Promise.reject('Method not implemented.');
   }
 
+  convertPullRequestToDraft(
+    _input: ConvertPullRequestToDraftInput,
+  ): Promise<ConvertPullRequestToDraftMutationData> {
+    return Promise.reject('Method not implemented.');
+  }
+
+  markPullRequestReadyForReview(
+    _input: MarkPullRequestReadyForReviewInput,
+  ): Promise<MarkPullRequestReadyForReviewMutationData> {
+    return Promise.reject('Method not implemented.');
+  }
+
   addComment(_id: ID, _body: string): Promise<AddCommentMutationData> {
     return Promise.reject('Method not implemented.');
   }
@@ -88,6 +126,52 @@ export default class RejectingGitHubClient implements GitHubClient {
   addPullRequestReviewComment(
     _input: AddPullRequestReviewCommentInput,
   ): Promise<AddPullRequestReviewCommentMutationData> {
+    return Promise.reject('Method not implemented.');
+  }
+
+  addPullRequestReviewThread(
+    _input: AddPullRequestReviewThreadInput,
+  ): Promise<AddPullRequestReviewThreadMutationData> {
+    return Promise.reject('Method not implemented.');
+  }
+
+  addReaction(_input: AddReactionInput): Promise<AddReactionMutationData> {
+    return Promise.reject('Method not implemented.');
+  }
+
+  removeReaction(_input: RemoveReactionInput): Promise<RemoveReactionMutationData> {
+    return Promise.reject('Method not implemented.');
+  }
+
+  resolveReviewThread(
+    _input: ResolveReviewThreadInput,
+  ): Promise<ResolveReviewThreadMutationData> {
+    return Promise.reject('Method not implemented.');
+  }
+
+  unresolveReviewThread(
+    _input: UnresolveReviewThreadInput,
+  ): Promise<UnresolveReviewThreadMutationData> {
+    return Promise.reject('Method not implemented.');
+  }
+
+  updateIssueComment(_input: UpdateIssueCommentInput): Promise<UpdateIssueCommentMutationData> {
+    return Promise.reject('Method not implemented.');
+  }
+
+  deleteIssueComment(_input: DeleteIssueCommentInput): Promise<DeleteIssueCommentMutationData> {
+    return Promise.reject('Method not implemented.');
+  }
+
+  updatePullRequestReviewComment(
+    _input: UpdatePullRequestReviewCommentInput,
+  ): Promise<UpdatePullRequestReviewCommentMutationData> {
+    return Promise.reject('Method not implemented.');
+  }
+
+  deletePullRequestReviewComment(
+    _input: DeletePullRequestReviewCommentInput,
+  ): Promise<DeletePullRequestReviewCommentMutationData> {
     return Promise.reject('Method not implemented.');
   }
 

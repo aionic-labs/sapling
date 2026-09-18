@@ -17,14 +17,36 @@ import type {
   AddPullRequestReviewMutationData,
   AddPullRequestReviewCommentInput,
   AddPullRequestReviewCommentMutationData,
+  AddPullRequestReviewThreadInput,
+  AddPullRequestReviewThreadMutationData,
+  AddReactionInput,
+  AddReactionMutationData,
+  ConvertPullRequestToDraftInput,
+  ConvertPullRequestToDraftMutationData,
+  DeleteIssueCommentInput,
+  DeleteIssueCommentMutationData,
+  DeletePullRequestReviewCommentInput,
+  DeletePullRequestReviewCommentMutationData,
   LabelFragment,
+  MarkPullRequestReadyForReviewInput,
+  MarkPullRequestReadyForReviewMutationData,
   RemoveLabelsFromLabelableInput,
   RemoveLabelsFromLabelableMutationData,
+  RemoveReactionInput,
+  RemoveReactionMutationData,
   RequestReviewsInput,
   RequestReviewsMutationData,
+  ResolveReviewThreadInput,
+  ResolveReviewThreadMutationData,
   StackPullRequestFragment,
   SubmitPullRequestReviewInput,
   SubmitPullRequestReviewMutationData,
+  UpdateIssueCommentInput,
+  UpdateIssueCommentMutationData,
+  UpdatePullRequestReviewCommentInput,
+  UpdatePullRequestReviewCommentMutationData,
+  UnresolveReviewThreadInput,
+  UnresolveReviewThreadMutationData,
   UserFragment,
 } from '../generated/graphql';
 
@@ -42,6 +64,7 @@ import type {
 export default interface GitHubClient {
   getCommit(oid: GitObjectID): Promise<Commit | null>;
   getCommitComparison(base: GitObjectID, head: GitObjectID): Promise<CommitComparison | null>;
+  prefetchTree(oid: GitObjectID): Promise<void>;
   getTree(oid: GitObjectID): Promise<Tree | null>;
   getBlob(oid: GitObjectID): Promise<Blob | null>;
   getPullRequest(pr: number): Promise<PullRequest | null>;
@@ -49,6 +72,14 @@ export default interface GitHubClient {
   getRepoAssignableUsers(query: string | null): Promise<UserFragment[]>;
   getRepoLabels(query: string | null): Promise<LabelFragment[]>;
   getStackPullRequests(prs: number[]): Promise<StackPullRequestFragment[]>;
+
+  convertPullRequestToDraft(
+    input: ConvertPullRequestToDraftInput,
+  ): Promise<ConvertPullRequestToDraftMutationData>;
+
+  markPullRequestReadyForReview(
+    input: MarkPullRequestReadyForReviewInput,
+  ): Promise<MarkPullRequestReadyForReviewMutationData>;
 
   /**
    * Add a comment to an issue or pull request:
@@ -78,6 +109,29 @@ export default interface GitHubClient {
   addPullRequestReviewComment(
     input: AddPullRequestReviewCommentInput,
   ): Promise<AddPullRequestReviewCommentMutationData>;
+
+  /** Adds a new thread to an existing pending pull request review. */
+  addPullRequestReviewThread(
+    input: AddPullRequestReviewThreadInput,
+  ): Promise<AddPullRequestReviewThreadMutationData>;
+
+  addReaction(input: AddReactionInput): Promise<AddReactionMutationData>;
+  removeReaction(input: RemoveReactionInput): Promise<RemoveReactionMutationData>;
+  resolveReviewThread(
+    input: ResolveReviewThreadInput,
+  ): Promise<ResolveReviewThreadMutationData>;
+  unresolveReviewThread(
+    input: UnresolveReviewThreadInput,
+  ): Promise<UnresolveReviewThreadMutationData>;
+
+  updateIssueComment(input: UpdateIssueCommentInput): Promise<UpdateIssueCommentMutationData>;
+  deleteIssueComment(input: DeleteIssueCommentInput): Promise<DeleteIssueCommentMutationData>;
+  updatePullRequestReviewComment(
+    input: UpdatePullRequestReviewCommentInput,
+  ): Promise<UpdatePullRequestReviewCommentMutationData>;
+  deletePullRequestReviewComment(
+    input: DeletePullRequestReviewCommentInput,
+  ): Promise<DeletePullRequestReviewCommentMutationData>;
 
   /**
    * Removes labels from a Labelable object.

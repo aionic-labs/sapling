@@ -5,9 +5,8 @@ fragment StackPullRequestFragment on PullRequest {
   title
   updatedAt
   state
+  isDraft
   reviewDecision
   headRefOid
-  comments {
-    totalCount
-  }
+  totalCommentsCount
 }

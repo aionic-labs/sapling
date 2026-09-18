@@ -11,11 +11,14 @@
 
 import type {
   CheckRunFragment,
+  HomePagePullRequestFragment,
   LabelFragment,
   StackPullRequestFragment,
   UserFragment,
   UserHomePageQueryData,
   UserHomePageQueryVariables,
+  UserReviewRequestsQueryData,
+  UserReviewRequestsQueryVariables,
   UsernameQueryData,
   UsernameQueryVariables,
 } from '../generated/graphql';
@@ -29,7 +32,7 @@ import type {
   PullRequestCommitItem,
 } from '../github/pullRequestTimelineTypes';
 import type {PullsQueryInput, PullsWithPageInfo} from '../github/pullsTypes';
-import type {CommitComparison} from '../github/restApiTypes';
+import type {CommitComparison, CommitComparisonFile} from '../github/restApiTypes';
 import type {
   Blob,
   Commit,
@@ -43,7 +46,12 @@ import type {
 import type {SaplingPullRequestBody} from '../saplingStack';
 
 import {lineToPositionAtom} from '../diffServiceClient';
-import {DiffSide, UsernameQuery, UserHomePageQuery} from '../generated/graphql';
+import {
+  DiffSide,
+  UsernameQuery,
+  UserHomePageQuery,
+  UserReviewRequestsQuery,
+} from '../generated/graphql';
 import {pullRequestNumbersFromBody} from '../ghstackUtils';
 import CachingGitHubClient, {openDatabase} from '../github/CachingGitHubClient';
 import GraphQLGitHubClient from '../github/GraphQLGitHubClient';
@@ -53,6 +61,7 @@ import {diffVersions} from '../github/diffVersions';
 import {createGraphQLEndpointForHostname} from '../github/gitHubCredentials';
 import {broadcastLogoutMessage, subscribeToLogout} from '../github/logoutBroadcastChannel';
 import queryGraphQL from '../github/queryGraphQL';
+import reviewThreadsForVersion from '../reviewThreadsForVersion';
 import {parseSaplingStackBody} from '../saplingStack';
 import {getPathForChange, getTreeEntriesForChange} from '../utils';
 import {atom} from 'jotai';
@@ -634,6 +643,20 @@ export type ComparableVersions = {
 const gitHubPullRequestComparableVersionsBaseAtom = atom<ComparableVersions | null>(null);
 
 /**
+ * The latest commit OID is kept as a primitive dependency so refreshing PR
+ * comments does not invalidate the code diff when the head commit is unchanged.
+ */
+const gitHubPullRequestLatestCommitOIDAtom = atom<GitObjectID | null>(get => {
+  const pullRequest = get(gitHubPullRequestAtom);
+  const commits = (pullRequest?.timelineItems?.nodes ?? [])
+    .map(item =>
+      item?.__typename === 'PullRequestCommit' ? (item as PullRequestCommitItem).commit.oid : null,
+    )
+    .filter(notEmpty);
+  return commits[commits.length - 1] ?? null;
+});
+
+/**
  * Derived atom that provides a default value when the base atom is null.
  * The default uses the latest version's head commit as the afterCommitID.
  */
@@ -644,32 +667,14 @@ export const gitHubPullRequestComparableVersionsAtom = atom(
       return stored;
     }
 
-    // Compute default from the pull request's timeline commits
-    const pullRequest = get(gitHubPullRequestAtom);
-    if (pullRequest == null) {
-      return null;
-    }
-
-    // Get the latest commit from the PR timeline (same logic as gitHubPullRequestCommitsAtom)
-    const commits = (pullRequest.timelineItems?.nodes ?? [])
-      .map(item => {
-        if (item?.__typename === 'PullRequestCommit') {
-          const commit = item as PullRequestCommitItem;
-          return commit.commit;
-        } else {
-          return null;
-        }
-      })
-      .filter(notEmpty);
-
-    const latestCommit = commits[commits.length - 1];
-    if (latestCommit == null) {
+    const latestCommitOID = get(gitHubPullRequestLatestCommitOIDAtom);
+    if (latestCommitOID == null) {
       return null;
     }
 
     return {
       beforeCommitID: null,
-      afterCommitID: latestCommit.oid,
+      afterCommitID: latestCommitOID,
     };
   },
   (get, set, newValue: ComparableVersions | null) => {
@@ -704,13 +709,8 @@ export const gitHubPullRequestCommitBaseParentAtom = atomFamily(
   (commitID: GitObjectID) =>
     atom<Promise<{oid: GitObjectID; committedDate: DateTime} | null>>(async get => {
       const client = await get(gitHubClientAtom);
-      const pullRequest = get(gitHubPullRequestAtom);
-      if (client == null || pullRequest == null) {
-        return null;
-      }
-
-      const baseRef = pullRequest.baseRefOid;
-      if (baseRef == null) {
+      const baseRef = get(gitHubPullRequestBaseRefAtom);
+      if (client == null || baseRef == null) {
         return null;
       }
 
@@ -783,6 +783,20 @@ export const gitHubPullRequestVersionDiffAtom = atom<Promise<DiffWithCommitIDs |
       return null;
     }
 
+    // Sapling submits every commit in a stack as a PR based on the repository's
+    // main branch. GitHub's merge-base comparison therefore includes all lower
+    // commits in the stack. Compare the selected Sapling commit with its Git
+    // parent so the diff contains only the change represented by this PR.
+    if (beforeCommitID == null && get(stackedPullRequestAtom).type === 'sapling') {
+      const afterCommit = await get(gitHubCommitAtom(afterCommitID));
+      const parentCommitID = afterCommit?.parents.length === 1 ? afterCommit.parents[0] : null;
+      if (parentCommitID != null) {
+        return get(
+          gitHubDiffForCommitsAtom({baseCommitID: parentCommitID, commitID: afterCommitID}),
+        );
+      }
+    }
+
     // Get the base parent for the "after" commit
     const afterBaseParent = await get(gitHubPullRequestCommitBaseParentAtom(afterCommitID));
     const afterBaseCommitID = afterBaseParent?.oid;
@@ -829,6 +843,41 @@ export const gitHubPullRequestVersionDiffAtom = atom<Promise<DiffWithCommitIDs |
 
     return null;
   },
+);
+
+export type FileLineStats = {additions: number; deletions: number};
+
+/** GitHub's per-file metadata for the active version comparison. */
+export const gitHubPullRequestComparisonFilesAtom = atom<Promise<CommitComparisonFile[]>>(
+  async get => {
+    const client = await get(gitHubClientAtom);
+    const diff = await get(gitHubPullRequestVersionDiffAtom);
+    if (client == null || diff?.commitIDs == null) {
+      return [];
+    }
+
+    try {
+      const comparison = await client.getCommitComparison(
+        diff.commitIDs.before,
+        diff.commitIDs.after,
+      );
+      return comparison?.files ?? [];
+    } catch {
+      // File navigation should remain usable if GitHub cannot provide metadata.
+      return [];
+    }
+  },
+);
+
+/** Per-file line totals for the active version comparison. */
+export const gitHubPullRequestFileLineStatsAtom = atom<Promise<Map<string, FileLineStats>>>(
+  async get =>
+    new Map(
+      (await get(gitHubPullRequestComparisonFilesAtom)).map(file => [
+        file.filename,
+        {additions: file.additions, deletions: file.deletions},
+      ]),
+    ),
 );
 
 /**
@@ -1000,14 +1049,14 @@ export const gitHubPullRequestVersionsAtom = atom<Promise<Version[]>>(async get 
   const stackedPR = get(stackedPullRequestAtom);
   if (stackedPR.type === 'sapling') {
     const fragments = await get(stackedPullRequestFragmentsAtom);
-    if (fragments.length !== stackedPR.body.stack.length) {
-      // This is unexpected: bail out.
-      return [];
-    }
     versions.reverse();
 
     const index = stackedPR.body.currentStackEntry;
-    const parentFragment = fragments[index + 1];
+    const parentPullRequest = stackedPR.body.stack[index + 1];
+    const parentFragment =
+      parentPullRequest == null
+        ? null
+        : fragments.find(fragment => fragment.number === parentPullRequest.number);
 
     const saplingStack = stackedPR.body;
 
@@ -1304,16 +1353,27 @@ const gitHubPullRequestThreadsForCommitFileBySideAtom = atomFamily(
  */
 export const gitHubPullRequestThreadsForDiffFileAtom = atomFamily(
   (path: string) =>
-    atom<ThreadsBySide | null>(get => {
+    atom<Promise<ThreadsBySide | null>>(async get => {
       const comparableVersions = get(gitHubPullRequestComparableVersionsAtom);
       if (comparableVersions == null) {
         return null;
       }
 
       const {beforeCommitID, afterCommitID} = comparableVersions;
-      const afterThreads = get(
-        gitHubPullRequestThreadsForCommitFileBySideAtom({commitID: afterCommitID, path}),
-      );
+      const versions = await get(gitHubPullRequestVersionsAtom);
+      const allThreads = get(gitHubPullRequestReviewThreadsAtom);
+
+      const threadsThroughVersion = (commitID: GitObjectID | null): ThreadsBySide | null => {
+        if (commitID == null) {
+          return null;
+        }
+        return (
+          reviewThreadsForVersion(allThreads, versions, commitID, path) ??
+          get(gitHubPullRequestThreadsForCommitFileBySideAtom({commitID, path}))
+        );
+      };
+
+      const afterThreads = threadsThroughVersion(afterCommitID);
 
       // If there is no explicit "before" (i.e., the "after" is being compared
       // against its base), show the "after" threads as they are, according to
@@ -1322,9 +1382,7 @@ export const gitHubPullRequestThreadsForDiffFileAtom = atomFamily(
         return afterThreads;
       }
 
-      const beforeThreads = get(
-        gitHubPullRequestThreadsForCommitFileBySideAtom({commitID: beforeCommitID, path}),
-      );
+      const beforeThreads = threadsThroughVersion(beforeCommitID);
 
       // If both "before" and "after" are explicitly selected, then both commits
       // themselves are being shown (i.e., we are comparing two `Right` sides).
@@ -1355,7 +1413,7 @@ export type ThreadsBySide = {[key in DiffSide]: GitHubPullRequestReviewThread[]}
  */
 export const gitHubThreadsForDiffFileAtom = atomFamily(
   (path: string) =>
-    atom<ThreadsBySide | null>(get => {
+    atom(get => {
       const pullRequest = get(gitHubPullRequestAtom);
       if (pullRequest != null) {
         return get(gitHubPullRequestThreadsForDiffFileAtom(path));
@@ -1552,23 +1610,44 @@ export const gitHubPullRequestCheckRunsAtom = atom<CheckRun[]>(get => {
  * Async atom that fetches the viewer's home-page PR data.
  * This includes review requests and recent pull requests.
  */
-export const gitHubUserHomePageDataAtom = atom<Promise<UserHomePageQueryData | null>>(_get => {
+export type GitHubUserHomePageData = {
+  pullRequests: Array<HomePagePullRequestFragment | null>;
+  reviewRequests: NonNullable<UserReviewRequestsQueryData['search']['nodes']>;
+};
+
+export const gitHubUserHomePageRefreshTriggerAtom = atom(0);
+
+export const gitHubUserHomePageDataAtom = atom<Promise<GitHubUserHomePageData | null>>(async get => {
+  get(gitHubUserHomePageRefreshTriggerAtom);
   const token = localStorage.getItem('github.token');
   if (token == null) {
-    return Promise.resolve(null);
+    return null;
   }
 
   // Based on search query for https://github.com/pulls/review-requested
-  const reviewRequestedQuery = 'is:open is:pr archived:false review-requested:@me';
+  const reviewRequestedQuery = 'is:pr archived:false review-requested:@me';
 
   const hostname = localStorage.getItem('github.hostname') ?? 'github.com';
   const graphQLEndpoint = createGraphQLEndpointForHostname(hostname);
-  return queryGraphQL<UserHomePageQueryData, UserHomePageQueryVariables>(
-    UserHomePageQuery,
-    {reviewRequestedQuery},
-    createRequestHeaders(token),
-    graphQLEndpoint,
-  );
+  const requestHeaders = createRequestHeaders(token);
+  const [homePageData, reviewRequestsData] = await Promise.all([
+    queryGraphQL<UserHomePageQueryData, UserHomePageQueryVariables>(
+      UserHomePageQuery,
+      {},
+      requestHeaders,
+      graphQLEndpoint,
+    ),
+    queryGraphQL<UserReviewRequestsQueryData, UserReviewRequestsQueryVariables>(
+      UserReviewRequestsQuery,
+      {reviewRequestedQuery},
+      requestHeaders,
+      graphQLEndpoint,
+    ),
+  ]);
+  return {
+    pullRequests: homePageData.viewer.pullRequests.nodes ?? [],
+    reviewRequests: reviewRequestsData.search.nodes ?? [],
+  };
 });
 
 // =============================================================================
@@ -1654,28 +1733,57 @@ export const gitHubPullRequestPendingReviewIDAtom = atom<ID | null>(get => {
 export const gitHubPullRequestReviewThreadsAtom = atom<GitHubPullRequestReviewThread[]>(get => {
   const pullRequest = get(gitHubPullRequestAtom);
   return (pullRequest?.reviewThreads.nodes ?? []).filter(notEmpty).map(reviewThread => {
-    const {originalLine, diffSide, comments} = reviewThread;
+    const {
+      id,
+      isResolved,
+      viewerCanResolve,
+      viewerCanUnresolve,
+      originalLine,
+      diffSide,
+      comments,
+    } = reviewThread;
     const normalizedComments = (comments?.nodes ?? [])
       .map(comment => {
         if (comment == null) {
           return null;
         }
 
-        const {id, author, originalCommit, path, state, bodyHTML} = comment;
+        const {
+          id,
+          author,
+          originalCommit,
+          commit,
+          path,
+          state,
+          body,
+          bodyHTML,
+          reactionGroups,
+        } = comment;
         const reviewThreadComment = {
           id,
           author: author ?? null,
           originalCommit,
+          commit,
           path,
           state,
+          body,
           bodyHTML,
+          reactionGroups: (reactionGroups ?? []).map(group => ({
+            content: group.content,
+            count: group.reactors.totalCount,
+            viewerHasReacted: group.viewerHasReacted,
+          })),
         };
         return reviewThreadComment;
       })
       .filter(notEmpty);
     const firstCommentID = normalizedComments[0].id;
     return {
+      id,
       firstCommentID,
+      isResolved,
+      viewerCanResolve,
+      viewerCanUnresolve,
       originalLine,
       diffSide,
       comments: normalizedComments,
@@ -1997,4 +2105,3 @@ export const stackedPullRequestFragmentsAtom = atom<Promise<StackPullRequestFrag
     return client.getStackPullRequests(prs);
   },
 );
-

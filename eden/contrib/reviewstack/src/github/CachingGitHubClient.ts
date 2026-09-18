@@ -18,23 +18,47 @@ import type {
   AddPullRequestReviewMutationData,
   AddPullRequestReviewCommentInput,
   AddPullRequestReviewCommentMutationData,
+  AddPullRequestReviewThreadInput,
+  AddPullRequestReviewThreadMutationData,
+  AddReactionInput,
+  AddReactionMutationData,
+  ConvertPullRequestToDraftInput,
+  ConvertPullRequestToDraftMutationData,
+  DeleteIssueCommentInput,
+  DeleteIssueCommentMutationData,
+  DeletePullRequestReviewCommentInput,
+  DeletePullRequestReviewCommentMutationData,
   LabelFragment,
+  MarkPullRequestReadyForReviewInput,
+  MarkPullRequestReadyForReviewMutationData,
   PullRequestReviewDecision,
   PullRequestState,
   RemoveLabelsFromLabelableInput,
   RemoveLabelsFromLabelableMutationData,
+  RemoveReactionInput,
+  RemoveReactionMutationData,
   RequestReviewsInput,
   RequestReviewsMutationData,
+  ResolveReviewThreadInput,
+  ResolveReviewThreadMutationData,
   StackPullRequestFragment,
   SubmitPullRequestReviewInput,
   SubmitPullRequestReviewMutationData,
+  UpdateIssueCommentInput,
+  UpdateIssueCommentMutationData,
+  UpdatePullRequestReviewCommentInput,
+  UpdatePullRequestReviewCommentMutationData,
+  UnresolveReviewThreadInput,
+  UnresolveReviewThreadMutationData,
   UserFragment,
 } from '../generated/graphql';
 
+import isFreshStackPullRequestCacheEntry from '../stackPullRequestCache';
 import {globalCacheStats} from './GitHubClientStats';
 import {DB_VERSION, DB_NAME} from './databaseInfo';
 import {subscribeToLogout} from './logoutBroadcastChannel';
 import rejectAfterTimeout from 'shared/rejectAfterTimeout';
+import {notEmpty} from 'shared/utils';
 
 const DB_COMMIT_STORE_NAME = 'commit';
 const DB_TREE_STORE_NAME = 'tree';
@@ -62,9 +86,11 @@ type NormalizedStackPullRequestFragment = {
   title: string;
   updatedAt: string;
   state: PullRequestState;
+  isDraft: boolean;
   reviewDecision: PullRequestReviewDecision | null | undefined;
   headRefOid: GitObjectID;
   numComments: number;
+  cachedAt: number;
 };
 
 /** Name of an IDBObjectStore in our IDBDatabase. */
@@ -151,6 +177,14 @@ class OpenTransaction<S extends Store, O = StoreTypes[S]> {
     });
   }
 
+  put(obj: O): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const request = this.store.put(obj);
+      request.onsuccess = _event => resolve();
+      request.onerror = reject;
+    });
+  }
+
   /**
    * Returns a Promise that resolves when the underlying IDBTransaction
    * completes.
@@ -169,6 +203,8 @@ function implementsGitObject(obj: unknown): obj is GitObject {
  * Decorates a GitHubClient, but uses IndexedDB as a caching layer.
  */
 export default class CachingGitHubClient implements GitHubClient {
+  private commitComparisons = new Map<string, Promise<CommitComparison | null>>();
+
   /**
    * owner and name must be non-null if the getStackPullRequests() will be
    * used.
@@ -220,8 +256,33 @@ export default class CachingGitHubClient implements GitHubClient {
   }
 
   getCommitComparison(base: GitObjectID, head: GitObjectID): Promise<CommitComparison | null> {
-    // No caching done for now.
-    return this.client.getCommitComparison(base, head);
+    // Both inputs are immutable commit IDs. Cache completed comparisons and
+    // deduplicate concurrent requests from the version picker, code diff, and
+    // comment-position calculations.
+    const key = `${base}\0${head}`;
+    const cached = this.commitComparisons.get(key);
+    if (cached != null) {
+      return cached;
+    }
+
+    const comparison = this.client.getCommitComparison(base, head).then(
+      result => {
+        if (result == null) {
+          this.commitComparisons.delete(key);
+        }
+        return result;
+      },
+      error => {
+        this.commitComparisons.delete(key);
+        throw error;
+      },
+    );
+    this.commitComparisons.set(key, comparison);
+    return comparison;
+  }
+
+  prefetchTree(oid: GitObjectID): Promise<void> {
+    return this.client.prefetchTree(oid);
   }
 
   async getTree(oid: GitObjectID): Promise<Tree | null> {
@@ -295,11 +356,9 @@ export default class CachingGitHubClient implements GitHubClient {
     // We record each cache miss with the necessary bookkeeping information to
     // patch up the cachedFragments array.
     const prsToFetch: number[] = [];
-    const prsToFetchIndex: number[] = [];
     cachedFragments.forEach((fragment, index) => {
       if (fragment == null) {
         prsToFetch.push(prs[index]);
-        prsToFetchIndex.push(index);
       }
     });
 
@@ -310,9 +369,12 @@ export default class CachingGitHubClient implements GitHubClient {
 
     const tx = new OpenTransaction(this.db, PR_FRAGMENT_STORE_NAME);
     await Promise.all(
-      fetchedFragments.map((fragment, index) => {
-        const originalIndex = prsToFetchIndex[index];
-        cachedFragments[originalIndex] = fragment;
+      fetchedFragments.map(fragment => {
+        prs.forEach((pr, index) => {
+          if (pr === fragment.number) {
+            cachedFragments[index] = fragment;
+          }
+        });
         const normalizedFragment = normalizePullRequestFragment(owner, name, fragment);
         // Stores a StackPullRequestFragment in IndexedDB, which uses
         // [owner, name, number] as the key. Of note:
@@ -322,11 +384,23 @@ export default class CachingGitHubClient implements GitHubClient {
         //   possible to evict/update entries in the table, as appropriate.
         // - StackPullRequestFragment is defined in StackPullRequestFragment.graphql,
         //   so if it changes, then this must be updated, as well.
-        return tx.add(normalizedFragment);
+        return tx.put(normalizedFragment);
       }),
     );
     await tx.commit();
-    return cachedFragments as StackPullRequestFragment[];
+    return cachedFragments.filter(notEmpty);
+  }
+
+  convertPullRequestToDraft(
+    input: ConvertPullRequestToDraftInput,
+  ): Promise<ConvertPullRequestToDraftMutationData> {
+    return this.client.convertPullRequestToDraft(input);
+  }
+
+  markPullRequestReadyForReview(
+    input: MarkPullRequestReadyForReviewInput,
+  ): Promise<MarkPullRequestReadyForReviewMutationData> {
+    return this.client.markPullRequestReadyForReview(input);
   }
 
   addComment(id: ID, body: string): Promise<AddCommentMutationData> {
@@ -347,6 +421,52 @@ export default class CachingGitHubClient implements GitHubClient {
     input: AddPullRequestReviewCommentInput,
   ): Promise<AddPullRequestReviewCommentMutationData> {
     return this.client.addPullRequestReviewComment(input);
+  }
+
+  addPullRequestReviewThread(
+    input: AddPullRequestReviewThreadInput,
+  ): Promise<AddPullRequestReviewThreadMutationData> {
+    return this.client.addPullRequestReviewThread(input);
+  }
+
+  addReaction(input: AddReactionInput): Promise<AddReactionMutationData> {
+    return this.client.addReaction(input);
+  }
+
+  removeReaction(input: RemoveReactionInput): Promise<RemoveReactionMutationData> {
+    return this.client.removeReaction(input);
+  }
+
+  resolveReviewThread(
+    input: ResolveReviewThreadInput,
+  ): Promise<ResolveReviewThreadMutationData> {
+    return this.client.resolveReviewThread(input);
+  }
+
+  unresolveReviewThread(
+    input: UnresolveReviewThreadInput,
+  ): Promise<UnresolveReviewThreadMutationData> {
+    return this.client.unresolveReviewThread(input);
+  }
+
+  updateIssueComment(input: UpdateIssueCommentInput): Promise<UpdateIssueCommentMutationData> {
+    return this.client.updateIssueComment(input);
+  }
+
+  deleteIssueComment(input: DeleteIssueCommentInput): Promise<DeleteIssueCommentMutationData> {
+    return this.client.deleteIssueComment(input);
+  }
+
+  updatePullRequestReviewComment(
+    input: UpdatePullRequestReviewCommentInput,
+  ): Promise<UpdatePullRequestReviewCommentMutationData> {
+    return this.client.updatePullRequestReviewComment(input);
+  }
+
+  deletePullRequestReviewComment(
+    input: DeletePullRequestReviewCommentInput,
+  ): Promise<DeletePullRequestReviewCommentMutationData> {
+    return this.client.deletePullRequestReviewComment(input);
   }
 
   removeLabels(
@@ -469,19 +589,32 @@ export default class CachingGitHubClient implements GitHubClient {
               return;
             }
 
-            const {title, updatedAt, state, reviewDecision, headRefOid, numComments} = result;
+            const {
+              title,
+              updatedAt,
+              state,
+              isDraft,
+              reviewDecision,
+              headRefOid,
+              numComments,
+              cachedAt,
+            } = result;
+            // Refetch cache entries written before StackPullRequestFragment
+            // included the draft state, and refresh mutable review metadata.
+            if (typeof isDraft !== 'boolean' || !isFreshStackPullRequestCacheEntry(cachedAt)) {
+              resolve(null);
+              return;
+            }
             resolve({
               __typename: 'PullRequest',
               number: pr,
               title,
               updatedAt,
               state,
+              isDraft,
               reviewDecision,
               headRefOid,
-              comments: {
-                __typename: 'IssueCommentConnection',
-                totalCount: numComments,
-              },
+              totalCommentsCount: numComments,
             });
           };
           request.onerror = reject;
@@ -632,7 +765,16 @@ function normalizePullRequestFragment(
   name: string,
   fragment: StackPullRequestFragment,
 ): NormalizedStackPullRequestFragment {
-  const {number, title, updatedAt, state, reviewDecision, headRefOid, comments} = fragment;
+  const {
+    number,
+    title,
+    updatedAt,
+    state,
+    isDraft,
+    reviewDecision,
+    headRefOid,
+    totalCommentsCount,
+  } = fragment;
   return {
     owner,
     name,
@@ -640,8 +782,10 @@ function normalizePullRequestFragment(
     title,
     updatedAt,
     state,
+    isDraft,
     reviewDecision,
     headRefOid,
-    numComments: comments.totalCount,
+    numComments: totalCommentsCount ?? 0,
+    cachedAt: Date.now(),
   };
 }

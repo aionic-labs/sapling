@@ -5,33 +5,50 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+import type {ReactionContent} from './generated/graphql';
 import type {ID, GitObject} from './github/types';
 
+import CommentLink from './CommentLink';
+import CommentReactions from './CommentReactions';
+import CommentReply from './CommentReply';
+import EditableComment from './EditableComment';
 import PullRequestReviewCommentLineNumber from './PullRequestReviewCommentLineNumber';
-import TrustedRenderedMarkdown from './TrustedRenderedMarkdown';
+import {pullRequestTimelineReplyIDAtom} from './PullRequestTimelineReply';
+import {commentAnchorID} from './commentLinkUtils';
 import {gitHubPullRequestCommentForIDAtom} from './jotai';
 import {Box} from '@primer/react';
-import {useAtomValue} from 'jotai';
+import {useAtom, useAtomValue} from 'jotai';
 
 type Props = {
   comment: {
     id: ID;
     originalCommit?: GitObject | null;
+    commit?: GitObject | null;
     path: string;
+    author?: {login: string} | null;
+    body: string;
     bodyHTML: string;
+    reactionGroups?: Array<{
+      content: ReactionContent;
+      count?: number;
+      reactors?: {totalCount: number};
+      viewerHasReacted: boolean;
+    }> | null | undefined;
   };
 };
 
 export default function PullRequestReviewComment({comment}: Props): React.ReactElement {
+  const [replyingToID, setReplyingToID] = useAtom(pullRequestTimelineReplyIDAtom);
   const reviewComment = useAtomValue(gitHubPullRequestCommentForIDAtom(comment.id));
   const commentID = comment.id;
-  const commit = comment.originalCommit?.oid;
+  const commit = comment.originalCommit?.oid ?? comment.commit?.oid;
   const lineNumber = reviewComment?.originalLine;
 
   return (
-    <div className="PRT-review-comment">
-      <Box color="accent.fg">
+    <div className="PRT-review-comment" id={commentAnchorID(comment.id)}>
+      <Box color="accent.fg" display="flex" justifyContent="space-between">
         <div className="PRT-review-comment-path-link">{comment.path}</div>
+        <CommentLink id={comment.id} />
       </Box>
       <Box display="grid" gridTemplateColumns="25px 1fr">
         <Box textAlign="right">
@@ -44,10 +61,31 @@ export default function PullRequestReviewComment({comment}: Props): React.ReactE
           )}
         </Box>
         <Box paddingLeft={2}>
-          <TrustedRenderedMarkdown
+          <EditableComment
+            id={comment.id}
+            authorLogin={comment.author?.login}
+            body={comment.body}
+            kind="review"
             className="PRT-review-comment-text"
-            trustedHTML={comment.bodyHTML}
+            bodyHTML={comment.bodyHTML}
           />
+          <CommentReactions
+            commentID={comment.id}
+            reactionGroups={(comment.reactionGroups ?? []).map(group => ({
+              content: group.content,
+              count: group.count ?? group.reactors?.totalCount ?? 0,
+              viewerHasReacted: group.viewerHasReacted,
+            }))}
+          />
+          {commit != null && (
+            <CommentReply
+              commentID={commentID}
+              commitID={commit}
+              isReplying={replyingToID === commentID}
+              onReply={() => setReplyingToID(commentID)}
+              onCancel={() => setReplyingToID(null)}
+            />
+          )}
         </Box>
       </Box>
     </div>

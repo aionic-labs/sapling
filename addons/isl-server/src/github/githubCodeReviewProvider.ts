@@ -12,9 +12,15 @@ import type {
   DiffSignalSummary,
   Disposable,
   Hash,
+  PullRequestReviewAction,
+  PullRequestReviewData,
   Result,
 } from 'isl/src/types';
-import type {CodeReviewProvider, CreateInlineCommentInput} from '../CodeReviewProvider';
+import type {
+  CodeReviewProvider,
+  CreatedInlineComment,
+  CreateInlineCommentInput,
+} from '../CodeReviewProvider';
 import type {Logger} from '../logger';
 import type {
   MergeQueueSupportQueryData,
@@ -30,7 +36,9 @@ import type {
 
 import {TypedEventEmitter} from 'shared/TypedEventEmitter';
 import {debounce} from 'shared/debounce';
+import {ejeca} from 'shared/ejeca';
 import {notEmpty} from 'shared/utils';
+import {Internal} from '../Internal';
 import {
   MergeQueueSupportQuery,
   PullRequestCommentsQuery,
@@ -39,6 +47,7 @@ import {
   YourPullRequestsQuery,
   YourPullRequestsWithoutMergeQueueQuery,
 } from './generated/graphql';
+import {GitHubReviewService, type GitHubReviewRestRequest} from './githubReview';
 import queryGraphQL from './queryGraphQL';
 import queryREST from './queryREST';
 
@@ -67,16 +76,51 @@ export type GitHubDiffSummary = {
   branchName?: string;
 };
 
+type GitHubCreatedReviewComment = {
+  id?: number;
+  html_url?: string;
+  body?: string;
+  created_at?: string;
+  user?: {login?: string; avatar_url?: string};
+};
+
+function createdInlineComment(comment: GitHubCreatedReviewComment): CreatedInlineComment {
+  return {
+    id: comment.id == null ? undefined : String(comment.id),
+    url: comment.html_url,
+    body: comment.body ?? '',
+    author: comment.user?.login ?? '',
+    authorAvatarUri: comment.user?.avatar_url,
+    created: comment.created_at == null ? new Date() : new Date(comment.created_at),
+  };
+}
+
 const DEFAULT_GH_FETCH_TIMEOUT = 60_000; // 1 minute
+const DIFF_SUMMARIES_AUTO_REFRESH_INTERVAL = 5 * 60_000;
 
 type GitHubCodeReviewSystem = CodeReviewSystem & {type: 'github'};
 export class GitHubCodeReviewProvider implements CodeReviewProvider {
+  private reviewService: GitHubReviewService;
+
   constructor(
     private codeReviewSystem: GitHubCodeReviewSystem,
     private logger: Logger,
-  ) {}
+  ) {
+    this.reviewService = new GitHubReviewService(
+      {
+        owner: codeReviewSystem.owner,
+        repo: codeReviewSystem.repo,
+        prUrl: diffId => this.getPrUrl(diffId),
+      },
+      {
+        query: <D, V>(query: string, variables: V) => this.query<D, V>(query, variables),
+        rest: request => this.runReviewRestRequest(request),
+      },
+    );
+  }
   private diffSummaries = new TypedEventEmitter<'data', Map<DiffId, GitHubDiffSummary>>();
   private hasMergeQueueSupport: Promise<boolean> | null = null;
+  private lastDiffSummariesFetchAt = 0;
 
   onChangeDiffSummaries(
     callback: (result: Result<Map<DiffId, GitHubDiffSummary>>) => unknown,
@@ -137,7 +181,15 @@ export class GitHubCodeReviewProvider implements CodeReviewProvider {
   }
 
   triggerDiffSummariesFetch = debounce(
-    async () => {
+    async (_diffs: Array<DiffId>, force = false) => {
+      const now = Date.now();
+      if (!force && now - this.lastDiffSummariesFetchAt < DIFF_SUMMARIES_AUTO_REFRESH_INTERVAL) {
+        return;
+      }
+      // Record attempts as well as successful fetches. When GitHub rejects a request, retrying from
+      // every repository poll only adds noise and prevents the rate limit from recovering cleanly.
+      this.lastDiffSummariesFetchAt = now;
+
       try {
         const hasMergeQueueSupport = await this.detectMergeQueueSupport();
         this.logger.info('fetching github PR summaries');
@@ -192,13 +244,17 @@ export class GitHubCodeReviewProvider implements CodeReviewProvider {
     /* leading */ true,
   );
 
-  public async fetchComments(diffId: string): Promise<DiffComment[]> {
+  public async fetchComments(
+    diffId: string,
+    options?: {includeReactions?: boolean},
+  ): Promise<DiffComment[]> {
     const response = await this.query<
       PullRequestCommentsQueryData,
       PullRequestCommentsQueryVariables
     >(PullRequestCommentsQuery, {
       url: this.getPrUrl(diffId),
       numToFetch: 50,
+      includeReactions: options?.includeReactions ?? true,
     });
 
     if (response == null) {
@@ -241,6 +297,10 @@ export class GitHubCodeReviewProvider implements CodeReviewProvider {
           }
           const mapComment = (comment: (typeof threadComments)[number]): DiffComment => ({
             id: String(comment.databaseId ?? comment.id),
+            url:
+              comment.databaseId == null
+                ? undefined
+                : `${this.getPrUrl(diffId)}#discussion_r${comment.databaseId}`,
             author: comment.author?.login ?? '',
             authorAvatarUri: comment.author?.avatarUrl,
             content: comment.body,
@@ -267,29 +327,73 @@ export class GitHubCodeReviewProvider implements CodeReviewProvider {
     ];
   }
 
-  public async createInlineComment(diffId: string, input: CreateInlineCommentInput): Promise<void> {
+  public async createInlineComment(
+    diffId: string,
+    input: CreateInlineCommentInput,
+  ): Promise<CreatedInlineComment> {
     const endpoint = `repos/${this.codeReviewSystem.owner}/${this.codeReviewSystem.repo}/pulls/${diffId}/comments`;
     if (input.replyTo != null) {
-      await queryREST(endpoint, this.codeReviewSystem.hostname, 'POST', {
-        body: input.body,
-        in_reply_to: Number(input.replyTo),
-      });
-      return;
+      const comment = await queryREST<GitHubCreatedReviewComment>(
+        endpoint,
+        this.codeReviewSystem.hostname,
+        'POST',
+        {
+          body: input.body,
+          in_reply_to: Number(input.replyTo),
+        },
+      );
+      return createdInlineComment(comment);
     }
 
     const pullRequest = await queryREST<{head: {sha: string}}>(
       `repos/${this.codeReviewSystem.owner}/${this.codeReviewSystem.repo}/pulls/${diffId}`,
       this.codeReviewSystem.hostname,
     );
-    await queryREST(endpoint, this.codeReviewSystem.hostname, 'POST', {
-      body: input.body,
-      commit_id: pullRequest.head.sha,
-      path: input.path,
-      line: input.line,
-      side: input.side,
-      ...(input.startLine == null || input.startLine === input.line
-        ? {}
-        : {start_line: input.startLine, start_side: input.side}),
+    const comment = await queryREST<GitHubCreatedReviewComment>(
+      endpoint,
+      this.codeReviewSystem.hostname,
+      'POST',
+      {
+        body: input.body,
+        commit_id: pullRequest.head.sha,
+        path: input.path,
+        line: input.line,
+        side: input.side,
+        ...(input.startLine == null || input.startLine === input.line
+          ? {}
+          : {start_line: input.startLine, start_side: input.side}),
+      },
+    );
+    return createdInlineComment(comment);
+  }
+
+  public fetchPullRequestReview(diffId: string): Promise<PullRequestReviewData> {
+    return this.reviewService.fetch(diffId);
+  }
+
+  public runPullRequestReviewAction(
+    diffId: string,
+    action: PullRequestReviewAction,
+  ): Promise<PullRequestReviewData> {
+    return this.reviewService.runAction(diffId, action);
+  }
+
+  private async runReviewRestRequest(request: GitHubReviewRestRequest): Promise<void> {
+    const args = [
+      'api',
+      '--hostname',
+      this.codeReviewSystem.hostname,
+      '--method',
+      request.method,
+      request.endpoint,
+    ];
+    for (const [key, value] of Object.entries(request.fields ?? {})) {
+      args.push(typeof value === 'number' ? '-F' : '-f', `${key}=${value}`);
+    }
+    await ejeca('gh', args, {
+      env: {
+        ...((await Internal.additionalGhEnvVars?.()) ?? {}),
+      },
     });
   }
 

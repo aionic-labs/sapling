@@ -18,6 +18,8 @@ import type {
   LandConfirmationInfo,
   LandInfo,
   OperationCommandProgressReporter,
+  PullRequestReviewAction,
+  PullRequestReviewData,
   Result,
   ServerToClientMessage,
 } from 'isl/src/types';
@@ -31,6 +33,15 @@ export type CreateInlineCommentInput = {
   startLine?: number;
   side: 'LEFT' | 'RIGHT';
   replyTo?: string;
+};
+
+export type CreatedInlineComment = {
+  id?: string;
+  url?: string;
+  body: string;
+  author: string;
+  authorAvatarUri?: string;
+  created: Date;
 };
 /**
  * API to fetch data from Remote Code Review system, like GitHub and Phabricator.
@@ -47,8 +58,8 @@ export interface CodeReviewProvider {
    * others: the Phabricator provider skips the cache-wide invalidation it does for `force` alone,
    * and since that cache has no per-diff eviction, the named diffs' cached counts survive too.
    *
-   * Both are requests rather than guarantees: the GitHub provider takes no arguments at all and
-   * stays on its own debounce.
+   * Both are requests rather than guarantees: the GitHub provider ignores `diffs`, throttles
+   * automatic refreshes, and lets `force` bypass that longer refresh interval.
    */
   triggerDiffSummariesFetch(diffs: Array<DiffId>, force?: boolean, partial?: boolean): unknown;
 
@@ -94,11 +105,26 @@ export interface CodeReviewProvider {
   /** Convert usernames/emails to avatar URIs */
   fetchAvatars?(authors: Array<string>): Promise<Map<string, string>>;
 
-  /** Convert usernames/emails to avatar URIs */
-  fetchComments?(diffId: DiffId): Promise<Array<DiffComment>>;
+  /** Fetch comments, optionally omitting reaction details for lightweight background refreshes. */
+  fetchComments?(
+    diffId: DiffId,
+    options?: {includeReactions?: boolean},
+  ): Promise<Array<DiffComment>>;
 
   /** Add a line comment or reply to the remote code review. */
-  createInlineComment?(diffId: DiffId, input: CreateInlineCommentInput): Promise<void>;
+  createInlineComment?(
+    diffId: DiffId,
+    input: CreateInlineCommentInput,
+  ): Promise<CreatedInlineComment | void>;
+
+  /** Fetch line-level review threads for a pull request. */
+  fetchPullRequestReview?(diffId: DiffId): Promise<PullRequestReviewData>;
+
+  /** Mutate a pull request review and return its refreshed state. */
+  runPullRequestReviewAction?(
+    diffId: DiffId,
+    action: PullRequestReviewAction,
+  ): Promise<PullRequestReviewData>;
 
   renderMarkup?: (markup: string) => Promise<string>;
 
