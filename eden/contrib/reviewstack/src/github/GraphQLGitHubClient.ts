@@ -57,6 +57,8 @@ import type {
   RepoAssignableUsersQueryVariables,
   RepoLabelsQueryData,
   RepoLabelsQueryVariables,
+  RepoMentionableUsersQueryData,
+  RepoMentionableUsersQueryVariables,
   RequestReviewsInput,
   RequestReviewsMutationData,
   RequestReviewsMutationVariables,
@@ -107,6 +109,7 @@ import {
   RemoveReactionMutation,
   RepoAssignableUsersQuery,
   RepoLabelsQuery,
+  RepoMentionableUsersQuery,
   RequestReviewsMutation,
   ResolveReviewThreadMutation,
   StackPullRequestQuery,
@@ -464,6 +467,20 @@ export default class GraphQLGitHubClient implements GitHubClient {
     );
 
     return (data.repository?.assignableUsers?.nodes ?? []).filter(notEmpty);
+  }
+
+  async getRepoMentionableUsers(query: string | null): Promise<UserFragment[]> {
+    const variables = {
+      owner: this.organization,
+      name: this.repositoryName,
+      query,
+    };
+    const data = await this.query<
+      RepoMentionableUsersQueryData,
+      RepoMentionableUsersQueryVariables
+    >(RepoMentionableUsersQuery, variables);
+
+    return (data.repository?.mentionableUsers.nodes ?? []).filter(notEmpty);
   }
 
   async getRepoLabels(query: string | null): Promise<LabelFragment[]> {
